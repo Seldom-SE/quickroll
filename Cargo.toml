@@ -1,0 +1,13 @@
+[package]
+name = "quickroll"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rand = "0.9.1"
+chumsky = "0.10.1"
+tokio = { version = "1.46", features = ["rt-multi-thread"] }
+serenity = "0.12.4"
+
+[features]
+debug = []
