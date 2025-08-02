@@ -34,7 +34,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Roll, Err<Rich<'a, char>>> {
             .repeated()
             .at_least(1)
             .collect::<Vec<_>>()
-            .map(|bs| -(bs.len() as i32)))
+            .map(|ds| -(ds.len() as i32)))
         .or_not()
         .map(|advantageousness| advantageousness.unwrap_or_default())
         .then_ignore(just('/').then(any().repeated()).or_not())
@@ -187,8 +187,7 @@ impl EventHandler for Handler {
                     .unwrap();
 
                 if let Err(err) = msg
-                    .channel_id
-                    .say(
+                    .reply(
                         &ctx.http,
                         rolls.into_iter().enumerate().fold(
                             #[cfg(feature = "debug")]
