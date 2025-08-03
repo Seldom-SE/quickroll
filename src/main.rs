@@ -40,8 +40,7 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Roll, Err<Rich<'a, char>>> {
         .then_ignore(just('/').then(any().repeated()).or_not())
         .then_ignore(end());
 
-    just('r')
-        .or(just('R'))
+    one_of("rR")
         .ignore_then(
             signed
                 .map(|num| vec![Expr::Dice { count: 1, size: 20 }, Expr::Literal(num)])
