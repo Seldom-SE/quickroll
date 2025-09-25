@@ -1,21 +1,36 @@
 use chumsky::{extra::Err, prelude::*};
 use rand::random_range;
-use serenity::{all::Message, async_trait, prelude::*};
+use serenity::{
+    all::{
+        Command, CommandOptionType, CreateCommand, CreateCommandOption, CreateInteractionResponse,
+        CreateInteractionResponseMessage, Interaction, Message, Ready, ResolvedOption,
+        ResolvedValue,
+    },
+    async_trait,
+    prelude::*,
+};
 use text::int;
+use tokio::main;
 
 #[derive(Debug)]
-enum Expr {
+enum Term {
     Dice { count: u32, size: u32 },
     Literal(i32),
 }
 
 #[derive(Debug)]
 struct Roll {
-    exprs: Vec<Expr>,
+    terms: Vec<Term>,
     advantageousness: i32,
 }
 
-fn parser<'a>() -> impl Parser<'a, &'a str, Roll, Err<Rich<'a, char>>> {
+fn message_parser<'a>() -> impl Parser<'a, &'a str, String, Err<Rich<'a, char>>> {
+    one_of("rR")
+        .ignore_then(any().repeated().collect::<String>())
+        .then_ignore(end())
+}
+
+fn expr_parser<'a>() -> impl Parser<'a, &'a str, Roll, Err<Rich<'a, char>>> {
     let num = int(10).map(|int: &str| int.parse().unwrap());
     let signed = just('-').or_not().then(num).map(|(neg, num)| {
         if neg.is_some() {
@@ -40,32 +55,28 @@ fn parser<'a>() -> impl Parser<'a, &'a str, Roll, Err<Rich<'a, char>>> {
         .then_ignore(just('/').then(any().repeated()).or_not())
         .then_ignore(end());
 
-    one_of("rR")
-        .ignore_then(
-            signed
-                .map(|num| vec![Expr::Dice { count: 1, size: 20 }, Expr::Literal(num)])
-                .then(ending)
-                .or(num
-                    .or_not()
-                    .then(just('d').ignore_then(num))
-                    .map(|(count, size)| {
-                        if let Some(count) = count {
-                            Expr::Dice { count, size }
-                        } else {
-                            Expr::Dice { count: 1, size }
-                        }
-                    })
-                    .or(signed.map(Expr::Literal))
-                    .separated_by(just('+'))
-                    .at_least(1)
-                    .collect::<Vec<Expr>>()
-                    .then(ending))
-                .or(ending.map(|advantageousness| {
-                    (vec![Expr::Dice { count: 1, size: 20 }], advantageousness)
-                })),
-        )
-        .map(|(exprs, advantageousness)| Roll {
-            exprs,
+    signed
+        .map(|num| vec![Term::Dice { count: 1, size: 20 }, Term::Literal(num)])
+        .then(ending)
+        .or(num
+            .or_not()
+            .then(just('d').ignore_then(num))
+            .map(|(count, size)| {
+                if let Some(count) = count {
+                    Term::Dice { count, size }
+                } else {
+                    Term::Dice { count: 1, size }
+                }
+            })
+            .or(signed.map(Term::Literal))
+            .separated_by(just('+'))
+            .at_least(1)
+            .collect::<Vec<Term>>()
+            .then(ending))
+        .or(ending
+            .map(|advantageousness| (vec![Term::Dice { count: 1, size: 20 }], advantageousness)))
+        .map(|(terms, advantageousness)| Roll {
+            terms,
             advantageousness,
         })
 }
@@ -75,176 +86,231 @@ struct Maximality {
     min: bool,
 }
 
+fn roll(expr: &str) -> Result<String, String> {
+    match expr_parser().parse(expr).into_result() {
+        Ok(roll) => {
+            if roll.terms.iter().any(|term| {
+                if let &Term::Dice { size, .. } = term {
+                    size == 0
+                } else {
+                    false
+                }
+            }) {
+                return Err("cannot roll dice of size 0".to_string());
+            }
+
+            let rolls = (0..=roll.advantageousness.abs()).map(|_| {
+            roll.terms
+                .iter()
+                .map(|term| match *term {
+                    Term::Dice { count, size } => {
+                        (0..count).map(|_| random_range(1..=size)).fold(
+                            (
+                                0,
+                                String::new(),
+                                Maximality {
+                                    max: true,
+                                    min: true,
+                                },
+                                0,
+                            ),
+                            |(sum, string, mut maximality, count), roll| {
+                                let mut crit = false;
+
+                                if roll > 1 {
+                                    maximality.min = false;
+                                    crit ^= true;
+                                }
+
+                                if roll < size {
+                                    maximality.max = false;
+                                    crit ^= true;
+                                }
+
+                                (
+                                    sum + roll as i32,
+                                    format!(
+                                        "{string}{}{}",
+                                        if string.is_empty() { "" } else { " " },
+                                        if crit {
+                                            format!("**{roll}**")
+                                        } else {
+                                            roll.to_string()
+                                        }
+                                    ),
+                                    maximality,
+                                    count + 1,
+                                )
+                            },
+                        )
+                    }
+                    Term::Literal(literal) => (
+                        literal,
+                        literal.to_string(),
+                        Maximality {
+                            max: true,
+                            min: true,
+                        },
+                        1,
+                    ),
+                })
+                .fold(
+                    (
+                        0,
+                        String::new(),
+                        Maximality {
+                            max: true,
+                            min: true,
+                        },
+                        0,
+                    ),
+                    |(sum, string, maximality, count), (term_sum, term, term_maximality, term_count)| {
+                        (
+                            sum + term_sum,
+                            format!(
+                                "{string}{}{term}",
+                                if string.is_empty() { "" } else { " + " },
+                            ),
+                            Maximality {
+                                max: maximality.max && term_maximality.max,
+                                min: maximality.min && term_maximality.min,
+                            },
+                            count + term_count,
+                        )
+                    },
+                )
+            }).collect::<Vec<_>>();
+
+            let (taken, _) = rolls
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, (sum, _, _, _))| {
+                    if roll.advantageousness >= 0 {
+                        *sum
+                    } else {
+                        -*sum
+                    }
+                })
+                .unwrap();
+
+            Ok(rolls.into_iter().enumerate().fold(
+                #[cfg(feature = "debug")]
+                format!("`{roll:?}`"),
+                #[cfg(not(feature = "debug"))]
+                String::new(),
+                |string, (index, (sum, roll, maximality, count))| {
+                    let delim = if index == taken { "" } else { "~~" };
+
+                    format!(
+                        "{string}{}{delim}{roll}{}{delim}",
+                        if string.is_empty() { "" } else { " " },
+                        if count > 1 {
+                            format!(
+                                " = {}",
+                                if maximality.max != maximality.min {
+                                    format!("**{sum}**")
+                                } else {
+                                    sum.to_string()
+                                }
+                            )
+                        } else {
+                            String::new()
+                        }
+                    )
+                },
+            ))
+        }
+        Err(errs) => {
+            #[cfg(feature = "debug")]
+            for err in &errs {
+                eprintln!("{err}");
+            }
+
+            Err(errs
+                .into_iter()
+                .map(|err| err.to_string())
+                .reduce(|err_1, err_2| format!("{err_1}; {err_2}"))
+                .unwrap_or_else(|| "error".to_string()))
+        }
+    }
+}
+
 struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
+    async fn ready(&self, ctx: Context, _: Ready) {
+        if let Err(err) =
+            Command::create_global_command(
+                &ctx.http,
+                CreateCommand::new("r").description("roll dice").add_option(
+                    CreateCommandOption::new(CommandOptionType::String, "dice", "dice expression"),
+                ),
+            )
+            .await
+        {
+            eprintln!("failed to create command: {err}")
+        }
+    }
+
     async fn message(&self, ctx: Context, msg: Message) {
-        match parser().parse(&msg.content).into_result() {
-            Ok(roll) => {
-                if roll.exprs.iter().any(|expr| {
-                    if let &Expr::Dice { count, size } = expr {
-                        count == 0 && size == 0
-                    } else {
-                        false
-                    }
-                }) {
-                    return;
-                }
+        let Some(expr) = message_parser().parse(&msg.content).into_output() else {
+            return;
+        };
 
-                let rolls = (0..=roll.advantageousness.abs()).map(|_| {
-                roll.exprs
-                    .iter()
-                    .map(|expr| match *expr {
-                        Expr::Dice { count, size } => {
-                            (0..count).map(|_| random_range(1..=size)).fold(
-                                (
-                                    0,
-                                    String::new(),
-                                    Maximality {
-                                        max: true,
-                                        min: true,
-                                    },
-                                    0,
-                                ),
-                                |(sum, string, mut maximality, count), roll| {
-                                    let mut crit = false;
+        let Ok(res) = roll(&expr) else {
+            return;
+        };
 
-                                    if roll > 1 {
-                                        maximality.min = false;
-                                        crit ^= true;
-                                    }
+        if let Err(err) = msg.reply(&ctx.http, res).await {
+            eprintln!("error sending message: {err:?}");
+        }
+    }
 
-                                    if roll < size {
-                                        maximality.max = false;
-                                        crit ^= true;
-                                    }
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        if let Interaction::Command(command) = interaction
+            && command.data.name == "r"
+        {
+            let options = command.data.options();
 
-                                    (
-                                        sum + roll as i32,
-                                        format!(
-                                            "{string}{}{}",
-                                            if string.is_empty() { "" } else { " " },
-                                            if crit {
-                                                format!("**{roll}**")
-                                            } else {
-                                                roll.to_string()
-                                            }
-                                        ),
-                                        maximality,
-                                        count + 1,
-                                    )
-                                },
-                            )
-                        }
-                        Expr::Literal(literal) => (
-                            literal,
-                            literal.to_string(),
-                            Maximality {
-                                max: true,
-                                min: true,
-                            },
-                            1,
-                        ),
-                    })
-                    .fold(
-                        (
-                            0,
-                            String::new(),
-                            Maximality {
-                                max: true,
-                                min: true,
-                            },
-                            0,
-                        ),
-                        |(sum, string, maximality, count), (expr_sum, expr, expr_maximality, expr_count)| {
-                            (
-                                sum + expr_sum,
-                                format!(
-                                    "{string}{}{expr}",
-                                    if string.is_empty() { "" } else { " + " },
-                                ),
-                                Maximality {
-                                    max: maximality.max && expr_maximality.max,
-                                    min: maximality.min && expr_maximality.min,
-                                },
-                                count + expr_count,
-                            )
-                        },
-                    )
-            }).collect::<Vec<_>>();
-
-                let (taken, _) = rolls
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|(_, (sum, _, _, _))| {
-                        if roll.advantageousness >= 0 {
-                            *sum
-                        } else {
-                            -*sum
-                        }
-                    })
-                    .unwrap();
-
-                if let Err(err) = msg
-                    .reply(
-                        &ctx.http,
-                        rolls.into_iter().enumerate().fold(
-                            #[cfg(feature = "debug")]
-                            format!("`{roll:?}`"),
-                            #[cfg(not(feature = "debug"))]
-                            String::new(),
-                            |string, (index, (sum, roll, maximality, count))| {
-                                let delim = if index == taken { "" } else { "~~" };
-
-                                format!(
-                                    "{string}{}{delim}{roll}{}{delim}",
-                                    if string.is_empty() { "" } else { " " },
-                                    if count > 1 {
-                                        format!(
-                                            " = {}",
-                                            if maximality.max != maximality.min {
-                                                format!("**{sum}**")
-                                            } else {
-                                                sum.to_string()
-                                            }
-                                        )
-                                    } else {
-                                        String::new()
-                                    }
-                                )
-                            },
-                        ),
-                    )
-                    .await
+            let (Ok(res) | Err(res)) = roll(
+                if let Some(ResolvedOption {
+                    value: ResolvedValue::String(expr),
+                    ..
+                }) = options.first()
                 {
-                    eprintln!("Error sending message: {err:?}");
-                }
-            }
-            Err(_errs) =>
+                    expr
+                } else {
+                    ""
+                },
+            );
+
+            if let Err(err) = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new().content(res),
+                    ),
+                )
+                .await
             {
-                #[cfg(feature = "debug")]
-                for err in _errs {
-                    eprintln!("{err}");
-                }
+                eprintln!("failed to respond to slash command: {err}");
             }
         }
     }
 }
 
-#[tokio::main]
+#[main]
 async fn main() {
     let token = include_str!("../TOKEN.txt");
     let intents = GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
 
-    // Create a new instance of the Client, logging in as a bot.
     let mut client = Client::builder(token, intents)
         .event_handler(Handler)
         .await
-        .expect("Err creating client");
+        .expect("err creating client");
 
-    // Start listening for events by starting a single shard
-    if let Err(why) = client.start().await {
-        eprintln!("Client error: {why:?}");
+    if let Err(err) = client.start().await {
+        eprintln!("client error: {err:?}");
     }
 }
