@@ -273,7 +273,7 @@ impl EventHandler for Handler {
         {
             let options = command.data.options();
 
-            let (Ok(res) | Err(res)) = roll(
+            if let Err(err) = match roll(
                 if let Some(ResolvedOption {
                     value: ResolvedValue::String(expr),
                     ..
@@ -283,17 +283,30 @@ impl EventHandler for Handler {
                 } else {
                     ""
                 },
-            );
-
-            if let Err(err) = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new().content(res),
-                    ),
-                )
-                .await
-            {
+            ) {
+                Ok(res) => {
+                    command
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new().content(res),
+                            ),
+                        )
+                        .await
+                }
+                Err(err) => {
+                    command
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content(err)
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await
+                }
+            } {
                 eprintln!("failed to respond to slash command: {err}");
             }
         }
