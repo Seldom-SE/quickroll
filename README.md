@@ -1,6 +1,7 @@
 # Quick Roll
 
-Discord bot for rolling dice concisely. Avoids slash commands, since those are fiddly, especially on
+Discord bot for rolling dice concisely. Provides an alternative to the slash command, since those
+are fiddly, especially on
 mobile. The aim is to provide dice rolling that doesn't interrupt roleplay.
 
 Quick Roll currently crashes in some edge cases, but you won't run into them in normal gameplay.
